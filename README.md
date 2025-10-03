@@ -200,15 +200,20 @@ model = torch.nn.DataParallel(model)
 # Implementation left as exercise for distributed setups
 ```
 
-## 📈 Performance Benchmarks
+## 📈 Performance Notes
 
-| Configuration | Model Size | Training Time | Peak Memory | Accuracy |
-|---------------|------------|---------------|-------------|----------|
-| Quick (t5-small) | ~60M params | ~5 min | ~2GB | TBD |
-| Default (t5-base) | ~220M params | ~30 min | ~8GB | TBD |
-| Large (t5-large) | ~770M params | ~2 hours | ~16GB | TBD |
+**Expected Resource Usage:**
+- **Quick Config** (t5-small + tapas-small): ~4-8GB GPU memory, suitable for experimentation
+- **Default Config** (t5-base + tapas-large): ~12-16GB GPU memory, recommended for full training
+- **Training Time**: Highly dependent on dataset size, hardware, and configuration
 
-*Benchmarks run on NVIDIA A100 GPU*
+**Important Notes:**
+- Actual performance varies significantly based on hardware and dataset subsets
+- Memory usage depends on batch size, sequence length, and model combinations
+- Use the quick config for initial testing and development
+- Benchmark your specific setup with small datasets first
+
+*Performance will vary based on your hardware and configuration*
 
 ## 🐛 Troubleshooting
 
