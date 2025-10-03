@@ -267,6 +267,7 @@ This project is developed for **ECE-570: Introduction to AI** coursework.
 
 ## 🔗 References
 
+- [DoT: An Efficient Double Transformer for NLP Tasks with Tables](https://arxiv.org/abs/2106.00479) - Original DoT paper
 - [Transformers Library](https://huggingface.co/transformers/)
 - [TAPAS Paper](https://arxiv.org/abs/2004.02349)
 - [T5 Paper](https://arxiv.org/abs/1910.10683)
