@@ -1,0 +1,83 @@
+# Default configuration for DoT model training
+# This file contains hyperparameters and settings for the DoT model
+
+# Model Configuration
+model:
+  # Memory encoder settings
+  memory_encoder:
+    model_name: "t5-base"
+    hidden_size: 768
+    proj_dim: 256
+  
+  # Pruning transformer settings  
+  pruning_transformer:
+    model_name: "google/tapas-large-finetuned-wtq"
+    top_k: 128
+  
+  # Task transformer settings
+  task_transformer:
+    model_name: "t5-base"
+    proj_dim: 256
+
+# Dataset Configuration
+data:
+  # PAQ dataset for memory
+  paq:
+    split: "train"
+    subset_ratio: 0.005  # Use 0.5% of dataset for quick experiments
+    model_name: "t5-base"
+  
+  # WikiSQL dataset for training/evaluation
+  wikisql:
+    train_split: "train"
+    test_split: "test"
+    train_subset_ratio: 0.1  # Use 10% of training data
+    test_subset_ratio: 0.3   # Use 30% of test data
+    model_name: "google/tapas-large-finetuned-wtq"
+    max_length: 512
+
+# Training Configuration
+training:
+  # Basic training settings
+  num_epochs: 3
+  batch_size: 8
+  learning_rate: 5e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  
+  # Advanced settings
+  gradient_clipping: 1.0
+  scheduler_type: "linear"  # linear, cosine, constant
+  log_steps: 100
+  eval_steps: 500
+  save_steps: 1000
+  
+  # Memory settings
+  memory_batch_size: 16
+  memory_top_k: 1
+
+# System Configuration
+system:
+  device: "auto"  # auto, cuda, cpu
+  seed: 42
+  num_workers: 4
+  pin_memory: true
+  
+  # Paths
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+  output_dir: "./outputs"
+  
+  # Resource limits
+  max_memory_entries: 10000
+  gradient_accumulation_steps: 1
+
+# Experiment Configuration
+experiment:
+  name: "dot_model_baseline"
+  description: "Baseline DoT model training on WikiSQL"
+  tags: ["dot", "table-qa", "baseline"]
+  
+  # Reproducibility
+  deterministic: false
+  benchmark: false
