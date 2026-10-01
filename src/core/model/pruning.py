@@ -29,6 +29,12 @@ class PruningTransformer(nn.Module):
         self.tapas = TapasForQuestionAnswering.from_pretrained(model_name)
         self.tokenizer = TapasTokenizer.from_pretrained(model_name)
 
+        self.register_buffer(
+            'max_type_ids',
+            torch.tensor(self.tapas.config.type_vocab_sizes) - 1,
+            persistent=False,
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -52,6 +58,6 @@ class PruningTransformer(nn.Module):
         hidden = self.tapas.tapas(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
+            token_type_ids=torch.minimum(token_type_ids, self.max_type_ids),
         ).last_hidden_state
         return hidden @ self.tapas.output_weights + self.tapas.output_bias
