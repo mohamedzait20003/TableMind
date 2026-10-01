@@ -1,0 +1,87 @@
+# Default configuration for DoT model training
+# This file contains hyperparameters and settings for the DoT model
+
+# Model Configuration
+model:
+  # Memory encoder settings
+  memory_encoder:
+    model_name: "t5-base"
+    proj_dim: 256  # hidden size is read from the T5 config
+
+  # Pruning transformer settings
+  pruning_transformer:
+    model_name: "google/tapas-large-finetuned-wtq"
+    top_k: 128
+
+  # Task transformer settings
+  task_transformer:
+    model_name: "t5-base"
+    max_length: 512  # T5 input length after re-tokenizing the pruned tokens
+
+# Dataset Configuration
+data:
+  # PAQ dataset for memory
+  paq:
+    split: "train"
+    num_examples: 30000  # Streamed sample (~0.4% of PAQ_pairs)
+    max_length: 64           # question tokens
+    passage_max_length: 128  # answer-passage tokens
+    eval_ratio: 0.05         # held out for retrieval accuracy
+    # tokenized with model.memory_encoder.model_name
+
+  # WikiSQL dataset for training/evaluation
+  wikisql:
+    train_split: "train"
+    eval_split: "validation"  # monitored during pretraining
+    test_split: "test"        # used only by the evaluation notebook
+    train_subset_ratio: 0.1  # Use 10% of training data
+    eval_subset_ratio: 0.1   # Use 10% of validation data
+    test_subset_ratio: 0.3   # Use 30% of test data
+    model_name: "google/tapas-large-finetuned-wtq"
+    max_length: 512
+    answer_max_length: 32  # T5 target length for executed SQL answers
+
+# Stage 1: contrastive memory-encoder training on PAQ
+memory_training:
+  num_epochs: 1
+  batch_size: 32  # in-batch negatives: larger is harder
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  temperature: 0.05
+  encode_batch_size: 64  # batch size when filling the memory store
+  log_steps: 50
+
+# Stage 2: DoT pretraining on WikiSQL
+pretraining:
+  num_epochs: 3
+  batch_size: 8
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  scheduler_type: "linear"  # linear, cosine, constant
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 1
+  log_steps: 100
+  memory_top_k: 8  # >1 so the softmax over retrieved entries trains the query projection
+
+# System Configuration
+system:
+  device: "auto"  # auto, cuda, cpu
+  seed: 42
+  num_workers: 2
+  checkpoint_dir: "./checkpoints"  # local copies
+  output_dir: "./outputs"          # plots
+
+# Persistent storage shared by the notebooks (Google Drive on Colab)
+storage:
+  drive_subdir: "TableMind/checkpoints"  # under MyDrive
+  local_dir: "./storage"                 # used outside Colab
+  memory_checkpoint: "memory_stage.pt"
+  pretrain_checkpoint: "pretrain_final.pt"
+
+# Experiment Configuration
+experiment:
+  name: "dot_model_baseline"
+  description: "Baseline DoT model training on WikiSQL"
+  tags: ["dot", "table-qa", "baseline"]

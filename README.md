@@ -1,256 +1,138 @@
 # ECE-570 Project — DoT Model Implementation — TableMind
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-1.9+-red.svg)](https://pytorch.org/)
-[![Transformers](https://img.shields.io/badge/🤗%20Transformers-4.20+-yellow.svg)](https://huggingface.co/transformers/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
+[![Transformers](https://img.shields.io/badge/🤗%20Transformers-4.40+-yellow.svg)](https://huggingface.co/transformers/)
 
-A **professionally organized** implementation of the Differentiable Optimized Transformer (DoT) model for table question answering tasks. This project converts the original Jupyter notebook into a modular, configurable, and testable Python package with modern ML engineering practices.
+An implementation of the DoT (Double Transformer) model for table question answering, extended with an external key-value memory. Training runs in two stages through three Colab-ready notebooks.
 
 ## 🎯 Project Overview
 
-The DoT model implements a hybrid architecture combining:
-- **Memory-augmented encoding** using T5 with external key-value storage
-- **Pruning mechanism** via TAPAS for candidate selection
-- **Task-specific generation** with memory-enhanced T5 decoder
-
-**Key Features:**
-- 🏗️ **Modular Architecture**: Clean separation of concerns with pluggable components
-- ⚙️ **Configuration-driven**: YAML-based configuration for easy experimentation
-- 🧪 **Comprehensive Testing**: Unit tests and integration tests
-- 📊 **Professional Training**: Advanced trainer with checkpointing, logging, and metrics
-- 🚀 **Easy Deployment**: Command-line interface for training and evaluation
-- 📈 **Visualization**: Built-in training curve plotting and metrics tracking
+- **Pruning transformer (TAPAS):** scores every token of the flattened table and question. The top-k tokens are kept, always including the question, in their original order.
+- **Task transformer (T5):** the kept TAPAS tokens are decoded back to text and re-tokenized for T5. Each table word's embedding is scaled by `sigmoid(pruning score)`, so the pruner is trained end to end through the T5 loss.
+- **Key-value memory:** a T5 memory encoder, trained contrastively on PAQ question–passage pairs, fills a store of question keys and passage values. The task transformer retrieves a softmax-weighted mix of the top-k values.
+- **Targets:** WikiSQL ships SQL queries, not answers, so each query is executed on its table and the result is the T5 target.
 
 ## 📁 Repository Structure
 
 ```
 .
-├── 📁 src/dot_model/          # Main package source code
-│   ├── 📁 core/               # Core model components
-│   │   ├── memory.py          # Memory encoder & key-value store
-│   │   ├── models.py          # Transformer models (Pruning, Task, DoT)
-│   │   └── __init__.py
-│   ├── 📁 data/               # Dataset loading and preprocessing
-│   │   ├── datasets.py        # PAQ and WikiSQL dataset classes
-│   │   └── __init__.py
-│   ├── 📁 training/           # Training infrastructure
-│   │   ├── trainer.py         # Professional trainer class
-│   │   ├── utils.py           # Training utilities
-│   │   └── __init__.py
-│   └── __init__.py            # Package exports
-├── 📁 config/                 # Configuration files
-│   ├── default.yaml           # Default hyperparameters
-│   └── quick.yaml             # Quick experiment config
-├── 📁 scripts/                # Command-line interface
-│   ├── train.py               # Training script
-│   └── evaluate.py            # Evaluation script
-├── 📁 tests/                  # Unit and integration tests
-│   └── test_models.py         # Model component tests
-├── 📁 notebooks/              # Jupyter notebooks (if any)
-├── 📄 requirements.txt        # Python dependencies
-├── 📄 README.md              # This file
-└── 📄 run_training.py         # Legacy simple runner (deprecated)
+├── src/
+│   ├── notebooks/
+│   │   ├── 01_memory.ipynb      # Stage 1: contrastive memory training + fill the store
+│   │   ├── 02_pretrain.ipynb    # Stage 2: DoT training on WikiSQL
+│   │   └── 03_evaluation.ipynb  # Test split: loss, token accuracy, exact match
+│   ├── config/
+│   │   ├── default.yaml       # t5-base + tapas-large, full experiment
+│   │   └── quick.yaml         # t5-small + tapas-small (inherits default.yaml)
+│   ├── core/
+│   │   ├── memory/
+│   │   │   ├── encoder.py     # MemoryEncoder
+│   │   │   └── store.py       # KeyValueMemoryStore
+│   │   ├── model/
+│   │   │   ├── pruning.py     # PruningTransformer (TAPAS)
+│   │   │   ├── task.py        # TaskTransformer (memory-augmented T5)
+│   │   │   └── dot.py         # DoTModel (prune → re-tokenize → generate)
+│   │   └── training/
+│   │       ├── base.py              # BaseTrainer (shared optimisation loop)
+│   │       ├── memory_trainer.py    # MemoryTrainer (stage 1)
+│   │       └── pretrain_trainer.py  # PretrainTrainer (stage 2)
+│   └── utils/
+│       ├── paq.py             # PAQDataset (streamed question–passage pairs)
+│       ├── wikisql.py         # WikiSQLDataset (official release, executed answers)
+│       ├── sql.py             # WikiSQL query executor
+│       ├── checkpoint.py      # save / load / upload / download checkpoints
+│       └── helpers.py         # config loading, seeding, collation, exact match
+└── requirements.txt
 ```
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Google Colab)
 
-### 1. Environment Setup
+Run the notebooks in order. Each opens with an **Open in Colab** badge, and its first cell clones this repository and installs the requirements.
+
+1. **[01_memory.ipynb](src/notebooks/01_memory.ipynb):** trains the memory encoder, fills the store, and uploads `memory_stage*.pt`.
+2. **[02_pretrain.ipynb](src/notebooks/02_pretrain.ipynb):** loads the memory stage, trains DoT on WikiSQL, and uploads `pretrain_final*.pt`. A `<experiment>_latest.pt` checkpoint is uploaded after every epoch.
+3. **[03_evaluation.ipynb](src/notebooks/03_evaluation.ipynb):** loads the trained model and reports test loss, token accuracy and exact match, overall and per aggregation type.
+
+Use **Runtime → Change runtime type → T4 GPU**. Checkpoints pass between notebooks through Google Drive (`MyDrive/TableMind/checkpoints`); you'll be asked to authorize Drive once per session. The notebooks clone the GitHub repository, so push your changes before running them on Colab.
+
+Each notebook selects its configuration in one line:
+
+```python
+CONFIG_PATH = "src/config/quick.yaml"   # or "src/config/default.yaml"
+```
+
+## 💻 Running Locally
 
 ```powershell
-# Create virtual environment
 python -m venv .venv
-
-# Activate environment
 .venv\Scripts\Activate.ps1
-
-# Install dependencies
 pip install -r requirements.txt
+pip install jupyter
+jupyter notebook src/notebooks/
 ```
 
-### 2. Quick Training Run
-
-```powershell
-# Quick experiment (small models, small datasets)
-python scripts/train.py --config config/quick.yaml
-
-# Full training with default configuration
-python scripts/train.py --config config/default.yaml
-
-# Custom experiment
-python scripts/train.py --config config/default.yaml --experiment-name my_experiment
-```
-
-### 3. Evaluation
-
-```powershell
-# Evaluate a trained model
-python scripts/evaluate.py --checkpoint checkpoints/my_experiment_final.pt
-```
+Outside Colab, the notebooks switch to the repository root and use `./storage` instead of Google Drive. WikiSQL is downloaded once to `~/.cache/tablemind`; set `TABLEMIND_CACHE` to change that location.
 
 ## ⚙️ Configuration
 
-The project uses YAML configuration files for easy experimentation:
+`quick.yaml` names `default.yaml` as its `base:` and overrides only what differs:
 
 ```yaml
-# Example config/quick.yaml
+base: default.yaml
+
 model:
   memory_encoder:
     model_name: "t5-small"
     proj_dim: 128
   pruning_transformer:
+    model_name: "google/tapas-small-finetuned-wtq"
     top_k: 64
 
-training:
+pretraining:
   num_epochs: 1
   batch_size: 4
-  learning_rate: 5e-5
-
-data:
-  paq:
-    subset_ratio: 0.001  # Use 0.1% for quick testing
 ```
 
-## 🏗️ Architecture Deep Dive
+| Section | Used by | Key settings |
+|---|---|---|
+| `model` | all stages | model names, `proj_dim`, pruning `top_k`, T5 input `max_length` |
+| `data.paq` | stage 1 | `num_examples` (streamed), question/passage lengths, `eval_ratio` |
+| `data.wikisql` | stages 2–3 | split names and subset ratios, `answer_max_length` |
+| `memory_training` | stage 1 | batch size (in-batch negatives), learning rate, `temperature` |
+| `pretraining` | stage 2 | epochs, learning rate, scheduler, gradient accumulation, `memory_top_k` |
+| `storage` | all stages | Drive folder and checkpoint names |
 
-### Core Components
-
-1. **Memory System** (`src/dot_model/core/memory.py`)
-   - `MemoryEncoder`: T5-based encoder with key-value projections
-   - `KeyValueMemoryStore`: CPU-backed storage with similarity retrieval
-
-2. **Model Components** (`src/dot_model/core/models.py`)
-   - `PruningTransformer`: TAPAS-based candidate scoring
-   - `TaskTransformer`: Memory-augmented T5 generation
-   - `DoTModel`: Complete pipeline integration
-
-3. **Data Pipeline** (`src/dot_model/data/datasets.py`)
-   - `PAQDataset`: Question-answer pairs for memory population
-   - `WikiSQLDataset`: Table QA with robust preprocessing
-
-4. **Training Infrastructure** (`src/dot_model/training/`)
-   - `DoTTrainer`: Professional trainer with checkpointing
-   - Utilities for data collation and memory encoding
-
-### Training Pipeline
+## 🏗️ Training Pipeline
 
 ```mermaid
 graph TD
-    A[PAQ Dataset] --> B[Memory Encoder]
-    B --> C[KeyValue Store]
-    D[WikiSQL Dataset] --> E[Data Loader]
-    E --> F[DoT Model]
-    C --> F
-    F --> G[Loss Computation]
-    G --> H[Optimization]
-    H --> I[Checkpointing]
-    I --> J[Evaluation]
+    A[PAQ question–passage pairs] --> B[Stage 1: contrastive MemoryTrainer]
+    B --> C[KeyValue store: question keys → passage values]
+    C --> D[(Drive: memory_stage.pt)]
+    D --> E[Stage 2: PretrainTrainer]
+    F[WikiSQL + executed SQL answers] --> E
+    E --> G[(Drive: pretrain_final.pt)]
+    G --> H[Evaluation: loss, token accuracy, exact match]
 ```
 
-## 🧪 Testing
+Inside `DoTModel.forward`:
 
-Run the test suite to verify installation:
-
-```powershell
-# Run all tests
-python -m pytest tests/ -v
-
-# Run specific test module
-python tests/test_models.py
-```
-
-## 📊 Experiment Tracking
-
-The trainer automatically tracks:
-- ✅ Training/validation losses
-- ✅ Token-level accuracy metrics  
-- ✅ Learning rate schedules
-- ✅ Model checkpoints
-- ✅ Training curve visualizations
-
-Results are saved to:
-- `checkpoints/`: Model checkpoints
-- `outputs/`: Training curves and logs
-
-## 🔧 Advanced Usage
-
-### Custom Model Components
-
-```python
-from dot_model import MemoryEncoder, KeyValueMemoryStore, DoTModel
-
-# Initialize with custom configurations
-memory_encoder = MemoryEncoder(
-    model_name='t5-large',
-    proj_dim=512
-)
-
-memory_store = KeyValueMemoryStore()
-model = DoTModel(memory_store, memory_encoder, k=256)
-```
-
-### Distributed Training
-
-The trainer supports single-GPU training out of the box. For multi-GPU:
-
-```python
-# Wrap model with DataParallel (basic multi-GPU)
-model = torch.nn.DataParallel(model)
-
-# Or use DistributedDataParallel for better performance
-# Implementation left as exercise for distributed setups
-```
+1. TAPAS scores each token with its cell-selection head (before temperature scaling and column masking, which would saturate the sigmoid).
+2. Padding is excluded, the question segment is always kept, and the top-k positions are taken in their original order.
+3. The kept word pieces are merged into words, with `header:` / `row:` / `;` markers, and re-tokenized with the T5 tokenizer.
+4. Each table word's T5 embeddings are scaled by `sigmoid(score)`. T5 encodes the result, adds the table embedding and the retrieved memory, and decodes the answer.
 
 ## 📈 Performance Notes
 
-**Expected Resource Usage:**
-- **Quick Config** (t5-small + tapas-small): ~4-8GB GPU memory, suitable for experimentation
-- **Default Config** (t5-base + tapas-large): ~12-16GB GPU memory, recommended for full training
-- **Training Time**: Highly dependent on dataset size, hardware, and configuration
-
-**Important Notes:**
-- Actual performance varies significantly based on hardware and dataset subsets
-- Memory usage depends on batch size, sequence length, and model combinations
-- Use the quick config for initial testing and development
-- Benchmark your specific setup with small datasets first
-
-*Performance will vary based on your hardware and configuration*
+- **Quick config** (t5-small + tapas-small, ~125M parameters) fits a free Colab T4.
+- **Default config** (t5-base + tapas-large) needs roughly 12–16 GB of GPU memory. If you run out of memory, lower `pretraining.batch_size` and raise `pretraining.gradient_accumulation_steps`.
+- Weights-only checkpoints are about 0.5 GB for quick and about 2.5 GB for default. Set `RESUMABLE = True` in `02_pretrain.ipynb` to also save optimizer state, which roughly triples the size.
 
 ## 🐛 Troubleshooting
 
-### Common Issues
-
-**OOM Errors:**
-```bash
-# Reduce batch size in config
-training:
-  batch_size: 2  # Instead of 8
-  
-# Or use gradient accumulation
-training:
-  gradient_accumulation_steps: 4
-```
-
-**Model Download Issues:**
-```bash
-# Set HuggingFace cache directory
-export HF_HOME=/path/to/large/disk
-
-# Or use offline mode
-export TRANSFORMERS_OFFLINE=1
-```
-
-**Import Errors:**
-```bash
-# Ensure proper Python path
-export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
-```
-
-## 🤝 Contributing
-
-1. **Code Style**: Follow PEP 8, use `black` for formatting
-2. **Testing**: Add tests for new components
-3. **Documentation**: Update docstrings and README
-4. **Configuration**: Use YAML configs, avoid hardcoded values
+- **`FileNotFoundError: ... run the previous stage's notebook first`:** the checkpoint isn't in the Drive folder. Run the notebooks in order with the same `CONFIG_PATH`.
+- **Model download issues:** set `HF_HOME=/path/to/large/disk`, or `HF_HUB_OFFLINE=1` once the models are cached.
 
 ## 📝 License & Citation
 
@@ -272,8 +154,4 @@ This project is developed for **ECE-570: Introduction to AI** coursework.
 - [TAPAS Paper](https://arxiv.org/abs/2004.02349)
 - [T5 Paper](https://arxiv.org/abs/1910.10683)
 - [WikiSQL Dataset](https://github.com/salesforce/WikiSQL)
-
----
-
-**🎓 Educational Note**: This implementation prioritizes code clarity and educational value over production optimization. For production use, consider additional optimizations like model quantization, ONNX export, and distributed inference.
-
+- [PAQ: 65 Million Probably-Asked Questions](https://arxiv.org/abs/2102.07033)
