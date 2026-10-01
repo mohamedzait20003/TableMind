@@ -1,6 +1,7 @@
-"""Core module initialization."""
+"""Core DoT components: memory, models and training stages."""
 from .memory import MemoryEncoder, KeyValueMemoryStore
-from .models import PruningTransformer, TaskTransformer, DoTModel
+from .model import PruningTransformer, TaskTransformer, DoTModel
+from .training import BaseTrainer, MemoryTrainer, PretrainTrainer
 
 __all__ = [
     "MemoryEncoder",
@@ -8,4 +9,7 @@ __all__ = [
     "PruningTransformer",
     "TaskTransformer",
     "DoTModel",
+    "BaseTrainer",
+    "MemoryTrainer",
+    "PretrainTrainer",
 ]
