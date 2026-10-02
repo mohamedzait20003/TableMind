@@ -1,8 +1,8 @@
 """
 General helpers shared by the notebooks.
 
-Configuration loading, seeding, device selection, WikiSQL batch collation
-and answer-level (exact match) evaluation.
+Configuration loading, seeding, device selection and WikiSQL batch
+collation.
 """
 
 import os
@@ -10,8 +10,7 @@ import yaml
 import torch
 import random
 import numpy as np
-from tqdm import tqdm
-from typing import Any, List, Dict, Optional, Tuple
+from typing import Any, List, Dict
 
 
 def _deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -61,7 +60,8 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         batch: List of dataset items
 
     Returns:
-        Batched tensors, plus the answer strings under 'answers'
+        Batched tensors, plus answer strings ('answers') and answer value
+        lists ('answer_values')
     """
     return {
         'input_ids': torch.stack([item['input_ids'] for item in batch]),
@@ -73,48 +73,14 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         ]),
         'labels': torch.stack([item['labels'] for item in batch]),
         'answers': [item.get('answer', '') for item in batch],
+        'answer_values': [item.get('answer_values', []) for item in batch],
     }
 
 
-def exact_match(
-    model: torch.nn.Module,
-    dataloader: torch.utils.data.DataLoader,
-    device: str,
-    max_new_tokens: int = 32,
-    max_batches: Optional[int] = None
-) -> Tuple[float, List[Dict[str, str]]]:
+def run_name(config: Dict[str, Any]) -> str:
     """
-    Generate answers and compare them to the executed SQL answers.
-
-    Args:
-        model: DoT model with a `generate` method
-        dataloader: WikiSQL loader built with `collate_fn`
-        device: Device to run generation on
-        max_new_tokens: Generation length limit
-        max_batches: Stop after this many batches (None = all)
-
-    Returns:
-        (exact-match accuracy, list of {'prediction', 'answer'} records)
+    Name of a pretraining run: experiment, memory ablation and seed, so the
+    3-seed runs and the no-memory ablation never overwrite each other.
     """
-    model.eval()
-    records = []
-    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Generating")):
-        if max_batches is not None and batch_idx >= max_batches:
-            break
-        predictions = model.generate(
-            batch['input_ids'].to(device),
-            batch['attention_mask'].to(device),
-            batch['token_type_ids'].to(device),
-            max_new_tokens=max_new_tokens,
-        )
-        for prediction, answer in zip(predictions, batch['answers']):
-            records.append({'prediction': prediction, 'answer': answer})
-
-    # Ignore case and whitespace: TAPAS splits punctuation ("guard - forward")
-    def normalize(text: str) -> str:
-        return ''.join(text.lower().split())
-
-    correct = sum(
-        normalize(r['prediction']) == normalize(r['answer']) for r in records
-    )
-    return (correct / len(records) if records else 0.0), records
+    memory = '' if config['model']['task_transformer']['use_memory'] else '_no_memory'
+    return f"{config['experiment']['name']}{memory}_seed{config['system']['seed']}"

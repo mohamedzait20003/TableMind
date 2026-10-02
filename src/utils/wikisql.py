@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 from typing import List, Dict, Any, Iterator, Optional
 from transformers import T5TokenizerFast, TapasTokenizer
 
-from .sql import Aggregation, Operator, Condition, execute_wikisql
+from .sql import ANSWER_SEPARATOR, Aggregation, Operator, Condition, execute_wikisql
 
 
 def tokenize_targets(
@@ -40,9 +40,14 @@ class WikiSQLExample:
     """Structured WikiSQL example."""
     question: str
     table: pd.DataFrame
-    answer: str
+    answer_values: List[str]
     aggregation: Aggregation
     conditions: List[Condition]
+
+    @property
+    def answer(self) -> str:
+        """T5 target text: answer values joined by ANSWER_SEPARATOR."""
+        return ANSWER_SEPARATOR.join(self.answer_values)
 
 
 _WIKISQL_URL = "https://github.com/salesforce/WikiSQL/raw/master/data.tar.bz2"
@@ -170,11 +175,11 @@ class WikiSQLDataset(Dataset):
                     for col_idx, op_idx, cond_value in sql['conds']
                 ]
 
-                answer = execute_wikisql(
+                answer_values = execute_wikisql(
                     table['rows'], table['types'], sql['sel'],
                     aggregation, conditions
                 )
-                if answer is None:
+                if answer_values is None:
                     skipped += 1
                     continue
 
@@ -186,7 +191,7 @@ class WikiSQLDataset(Dataset):
                 self.data.append(WikiSQLExample(
                     question=item['question'],
                     table=table_df,
-                    answer=answer,
+                    answer_values=answer_values,
                     aggregation=aggregation,
                     conditions=conditions
                 ))
@@ -209,8 +214,8 @@ class WikiSQLDataset(Dataset):
             idx: Item index
 
         Returns:
-            Dictionary with tokenized table-question pair, T5 labels and
-            the answer string
+            Dictionary with tokenized table-question pair, T5 labels, the
+            answer string and the answer values (for denotation accuracy)
         """
         example = self.data[idx]
         labels = tokenize_targets(
@@ -244,4 +249,5 @@ class WikiSQLDataset(Dataset):
             'token_type_ids': encoding['token_type_ids'].squeeze(0),
             'labels': labels,
             'answer': example.answer,
+            'answer_values': example.answer_values,
         }

@@ -7,7 +7,7 @@ value spaces for the external key-value memory.
 
 import torch
 import torch.nn as nn
-from typing import Tuple
+from typing import Any, Dict, Tuple
 from transformers import T5EncoderModel
 
 
@@ -38,6 +38,12 @@ class MemoryEncoder(nn.Module):
         hidden_size = self.encoder.config.d_model
         self.key_projection = nn.Linear(hidden_size, proj_dim)
         self.value_projection = nn.Linear(hidden_size, proj_dim)
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MemoryEncoder":
+        """Build from a loaded config (model.memory_encoder section)."""
+        encoder = config['model']['memory_encoder']
+        return cls(model_name=encoder['model_name'], proj_dim=encoder['proj_dim'])
 
     def forward(
         self,
