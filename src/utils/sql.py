@@ -2,12 +2,16 @@
 WikiSQL query execution.
 
 WikiSQL ships SQL queries, not answers; executing each query on its table
-gives the answer text used as the T5 target.
+gives the answer values (the denotation) used as the T5 target.
 """
 
 import enum
 import dataclasses
 from typing import Any, List, Optional
+
+# Joins multi-row answers in T5 targets. A single T5 token that occurs in
+# only ~0.03% of WikiSQL cells (", " collides with dates like "may 1, 1990").
+ANSWER_SEPARATOR = " | "
 
 
 class Aggregation(enum.Enum):
@@ -35,7 +39,7 @@ class Condition:
     cmp_value: Any
 
 
-def _to_float(value: Any) -> Optional[float]:
+def to_float(value: Any) -> Optional[float]:
     """Parse a WikiSQL cell as a number ("1,234" -> 1234.0), or None."""
     try:
         return float(str(value).replace(',', '').strip())
@@ -52,7 +56,7 @@ def _format_number(value: float) -> str:
 
 def _condition_holds(cell: str, condition: Condition, is_real: bool) -> bool:
     """Evaluate one WHERE condition on a cell, case-insensitively."""
-    cell_num, cmp_num = _to_float(cell), _to_float(condition.cmp_value)
+    cell_num, cmp_num = to_float(cell), to_float(condition.cmp_value)
     if condition.operator == Operator.EQUALS:
         if is_real and cell_num is not None and cmp_num is not None:
             return cell_num == cmp_num
@@ -70,9 +74,10 @@ def execute_wikisql(
     select_column: int,
     aggregation: Aggregation,
     conditions: List[Condition]
-) -> Optional[str]:
+) -> Optional[List[str]]:
     """
-    Execute a WikiSQL query on its table and return the answer text.
+    Execute a WikiSQL query on its table and return the answer values
+    (the denotation).
 
     Args:
         rows: Table rows (lists of cell strings)
@@ -82,7 +87,8 @@ def execute_wikisql(
         conditions: WHERE conditions (ANDed)
 
     Returns:
-        Lower-cased answer string, or None if the query has no answer
+        Lower-cased answer values (one per selected row, or a single
+        aggregate), or None if the query has no answer
     """
     selected = [
         row[select_column] for row in rows
@@ -93,11 +99,11 @@ def execute_wikisql(
     ]
 
     if aggregation == Aggregation.COUNT:
-        return str(len(selected))
+        return [str(len(selected))]
     if aggregation == Aggregation.NONE:
-        return ", ".join(selected).lower() if selected else None
+        return [value.lower() for value in selected] if selected else None
 
-    numbers = [n for n in (_to_float(v) for v in selected) if n is not None]
+    numbers = [n for n in (to_float(v) for v in selected) if n is not None]
     if not numbers:
         return None
     if aggregation == Aggregation.MAX:
@@ -108,4 +114,4 @@ def execute_wikisql(
         result = sum(numbers)
     else:
         result = sum(numbers) / len(numbers)
-    return _format_number(result)
+    return [_format_number(result)]

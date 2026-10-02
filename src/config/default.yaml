@@ -1,5 +1,7 @@
-# Default configuration for DoT model training
-# This file contains hyperparameters and settings for the DoT model
+# TableMind configuration
+# DoT (Krichene et al., 2021) setup on WikiSQL: a small pruning transformer
+# selects 256 of 1024 input tokens for a larger task transformer, which here
+# is T5 (instead of TAPAS) augmented with a key-value memory.
 
 # Model Configuration
 model:
@@ -8,15 +10,16 @@ model:
     model_name: "t5-base"
     proj_dim: 256  # hidden size is read from the T5 config
 
-  # Pruning transformer settings
+  # Pruning transformer: small TAPAS (4 layers, 512 hidden), as DoT(s -> l)
   pruning_transformer:
-    model_name: "google/tapas-large-finetuned-wtq"
-    top_k: 128
+    model_name: "google/tapas-small-finetuned-wtq"
+    top_k: 256  # TAPAS-token budget; whole cells, question and header always kept
 
-  # Task transformer settings
+  # Task transformer: T5 replaces DoT's second (large) TAPAS
   task_transformer:
     model_name: "t5-base"
-    max_length: 512  # T5 input length after re-tokenizing the pruned tokens
+    max_length: 512    # T5 input length after re-tokenizing the kept tokens
+    use_memory: true   # false = ablation without memory retrieval
 
 # Dataset Configuration
 data:
@@ -29,16 +32,16 @@ data:
     eval_ratio: 0.05         # held out for retrieval accuracy
     # tokenized with model.memory_encoder.model_name
 
-  # WikiSQL dataset for training/evaluation
+  # WikiSQL dataset for training/evaluation (full splits)
   wikisql:
     train_split: "train"
     eval_split: "validation"  # monitored during pretraining
     test_split: "test"        # used only by the evaluation notebook
-    train_subset_ratio: 0.1  # Use 10% of training data
-    eval_subset_ratio: 0.1   # Use 10% of validation data
-    test_subset_ratio: 0.3   # Use 30% of test data
-    model_name: "google/tapas-large-finetuned-wtq"
-    max_length: 512
+    train_subset_ratio: 1.0
+    eval_subset_ratio: 1.0
+    test_subset_ratio: 1.0
+    model_name: "google/tapas-small-finetuned-wtq"
+    max_length: 1024       # TAPAS input length before pruning, as in DoT
     answer_max_length: 32  # T5 target length for executed SQL answers
 
 # Stage 1: contrastive memory-encoder training on PAQ
@@ -54,7 +57,7 @@ memory_training:
 
 # Stage 2: DoT pretraining on WikiSQL
 pretraining:
-  num_epochs: 3
+  num_epochs: 3  # ~21k optimizer steps at batch size 8
   batch_size: 8
   learning_rate: 5.0e-5
   weight_decay: 0.01
@@ -68,20 +71,19 @@ pretraining:
 # System Configuration
 system:
   device: "auto"  # auto, cuda, cpu
-  seed: 42
+  seed: 42        # DoT reports the median of 3 runs: repeat with 3 seeds
   num_workers: 2
   checkpoint_dir: "./checkpoints"  # local copies
-  output_dir: "./outputs"          # plots
+  output_dir: "./outputs"          # plots and predictions
 
 # Persistent storage shared by the notebooks (Google Drive on Colab)
 storage:
   drive_subdir: "TableMind/checkpoints"  # under MyDrive
   local_dir: "./storage"                 # used outside Colab
-  memory_checkpoint: "memory_stage.pt"
-  pretrain_checkpoint: "pretrain_final.pt"
+  memory_checkpoint: "memory_stage.pt"   # shared by all pretraining runs
 
 # Experiment Configuration
 experiment:
-  name: "dot_model_baseline"
-  description: "Baseline DoT model training on WikiSQL"
-  tags: ["dot", "table-qa", "baseline"]
+  name: "dot_t5_memory"
+  description: "DoT with a T5 task transformer and key-value memory on WikiSQL"
+  tags: ["dot", "t5", "memory", "table-qa"]

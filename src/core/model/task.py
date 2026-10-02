@@ -7,7 +7,7 @@ embeddings and values retrieved from the key-value memory.
 
 import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Dict, Optional
 from transformers import T5ForConditionalGeneration, T5TokenizerFast
 
 from ..memory import MemoryEncoder, KeyValueMemoryStore, masked_mean
@@ -26,7 +26,8 @@ class TaskTransformer(nn.Module):
         memory_store: KeyValueMemoryStore,
         memory_encoder: MemoryEncoder,
         model_name: str = 't5-base',
-        memory_top_k: int = 8
+        memory_top_k: int = 8,
+        use_memory: bool = True
     ):
         """
         Initialize the task transformer.
@@ -36,6 +37,8 @@ class TaskTransformer(nn.Module):
             memory_encoder: Memory encoder for table embeddings
             model_name: HuggingFace model identifier for T5 model
             memory_top_k: Number of memory entries mixed per query
+            use_memory: Add retrieved memory values to the encoder states;
+                False gives the no-memory ablation (everything else equal)
         """
         super().__init__()
         self.tokenizer = T5TokenizerFast.from_pretrained(model_name)
@@ -44,12 +47,19 @@ class TaskTransformer(nn.Module):
         self.memory_store = memory_store
         self.memory_encoder = memory_encoder
         self.memory_top_k = memory_top_k
+        self.use_memory = use_memory
 
         # Projection layers for memory integration; the projection width
         # always matches the memory encoder's key/value width
         proj_dim = memory_encoder.key_projection.out_features
         self.query_projection = nn.Linear(self.t5.config.d_model, proj_dim)
         self.memory_projector = nn.Linear(proj_dim, self.t5.config.d_model)
+
+        # Zero-initialized gates (tanh(0) = 0): training starts from plain
+        # pretrained T5 instead of adding randomly projected vectors to every
+        # encoder state, and learns how much of each signal to mix in.
+        self.table_gate = nn.Parameter(torch.zeros(1))
+        self.memory_gate = nn.Parameter(torch.zeros(1))
 
     def encode(
         self,
@@ -82,8 +92,12 @@ class TaskTransformer(nn.Module):
         table_embeddings, _ = self.memory_encoder(input_ids, attention_mask)
         combined_hidden = (
             text_encoder_hidden
-            + self.memory_projector(table_embeddings).unsqueeze(1)
+            + torch.tanh(self.table_gate)
+            * self.memory_projector(table_embeddings).unsqueeze(1)
         )
+
+        if not self.use_memory:
+            return combined_hidden
 
         # Memory retrieval
         pooled = masked_mean(combined_hidden, attention_mask)
@@ -94,9 +108,19 @@ class TaskTransformer(nn.Module):
 
         if retrieved_memory is not None:
             retrieved_embed = self.memory_projector(retrieved_memory)
-            combined_hidden = combined_hidden + retrieved_embed.unsqueeze(1)
+            combined_hidden = (
+                combined_hidden
+                + torch.tanh(self.memory_gate) * retrieved_embed.unsqueeze(1)
+            )
 
         return combined_hidden
+
+    def gate_values(self) -> Dict[str, float]:
+        """Current mixing weights tanh(gate) of the table and memory signals."""
+        return {
+            'table_gate': torch.tanh(self.table_gate).item(),
+            'memory_gate': torch.tanh(self.memory_gate).item(),
+        }
 
     def forward(
         self,

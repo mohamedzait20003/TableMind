@@ -1,13 +1,14 @@
-"""Datasets, SQL execution, checkpoints and general helpers."""
+"""Datasets, SQL execution, metrics, checkpoints and general helpers."""
 from .paq import PAQDataset
 from .sql import execute_wikisql
 from .wikisql import WikiSQLDataset, load_wikisql
+from .metrics import denotation_match, evaluate_answers
 from .helpers import (
     load_config,
     set_seed,
     resolve_device,
     collate_fn,
-    exact_match,
+    run_name,
 )
 from .checkpoint import (
     in_colab,
@@ -23,11 +24,13 @@ __all__ = [
     "WikiSQLDataset",
     "load_wikisql",
     "execute_wikisql",
+    "denotation_match",
+    "evaluate_answers",
     "load_config",
     "set_seed",
     "resolve_device",
     "collate_fn",
-    "exact_match",
+    "run_name",
     "in_colab",
     "get_storage_dir",
     "save_checkpoint",
