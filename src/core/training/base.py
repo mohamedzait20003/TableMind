@@ -3,10 +3,14 @@ Shared training loop for both DoT training stages.
 
 Subclasses implement `compute_loss` and `evaluate`; checkpoint I/O lives in
 `utils.checkpoint` and uses `state_dict` / `load_state_dict` from here.
+Training can be checkpointed every few minutes and resumed mid-epoch.
 """
 
 import math
+import time
 import torch
+import random
+import numpy as np
 from tqdm import tqdm
 import torch.nn as nn
 from torch.optim import AdamW
@@ -14,6 +18,28 @@ import matplotlib.pyplot as plt
 from transformers import get_scheduler
 from torch.utils.data import DataLoader
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+
+def _get_rng_state() -> Dict[str, Any]:
+    """Python, NumPy, CPU and CUDA RNG states (tensors/tuples only, so the
+    checkpoint loads with torch.load(weights_only=True))."""
+    np_state = np.random.get_state()
+    return {
+        'python': random.getstate(),
+        'numpy': (np_state[0], torch.from_numpy(np_state[1].copy()), *np_state[2:]),
+        'torch': torch.get_rng_state(),
+        'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def _set_rng_state(state: Dict[str, Any]) -> None:
+    """Restore RNG states saved by `_get_rng_state`."""
+    random.setstate(state['python'])
+    name, keys, *rest = state['numpy']
+    np.random.set_state((name, keys.numpy(), *rest))
+    torch.set_rng_state(state['torch'])
+    if state['cuda'] is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state['cuda'])
 
 
 class BaseTrainer:
@@ -83,8 +109,15 @@ class BaseTrainer:
         # Training state
         self.global_step = 0
         self.epoch = 0
+        self.batches_done = 0       # batches finished in the current epoch
+        self.epoch_loss_sum = 0.0   # summed loss of those batches
         self.train_losses: List[float] = []
         self.eval_metrics: List[Dict[str, float]] = []
+
+        # Periodic checkpointing (configured by `train`)
+        self._on_checkpoint: Optional[Callable[["BaseTrainer"], None]] = None
+        self._checkpoint_seconds: Optional[float] = None
+        self._last_checkpoint = time.monotonic()
 
     def compute_loss(self, batch: Dict[str, Any]) -> torch.Tensor:
         """Return the training loss for one batch."""
@@ -105,64 +138,118 @@ class BaseTrainer:
         self.optimizer.zero_grad()
         self.global_step += 1
 
+    def _checkpoint(self) -> None:
+        """Call the checkpoint hook (if any) and restart the timer."""
+        if self._on_checkpoint is not None:
+            self._on_checkpoint(self)
+        self._last_checkpoint = time.monotonic()
+
+    def _checkpoint_due(self) -> bool:
+        """True when the periodic checkpoint interval has elapsed."""
+        return (
+            self._checkpoint_seconds is not None
+            and time.monotonic() - self._last_checkpoint >= self._checkpoint_seconds
+        )
+
     def train_epoch(self) -> float:
         """
-        Train for one epoch.
+        Train for one epoch, continuing after `batches_done` when resuming.
+
+        Mid-epoch resumption needs a sampler with `set_epoch(epoch, start)`
+        (utils.ResumableSampler), which replays the epoch's order and skips
+        the samples already trained on.
 
         Returns:
             Average training loss for the epoch
         """
+        loader = self.train_dataloader
+        start = self.batches_done
+        if hasattr(loader.sampler, 'set_epoch'):
+            loader.sampler.set_epoch(self.epoch, start * loader.batch_size)
+        elif start:
+            raise ValueError(
+                "Resuming mid-epoch needs a ResumableSampler on the train loader"
+            )
+
         self.model.train()
         self.optimizer.zero_grad()
-        total_loss = 0.0
-        num_batches = len(self.train_dataloader)
+        num_batches = start + len(loader)
+
+        # Creating a DataLoader iterator draws a seed from the global RNG; a
+        # resumed run creates an extra iterator mid-epoch, so keep the global
+        # RNG untouched to continue exactly like an uninterrupted run
+        rng_state = torch.get_rng_state()
+        batches = iter(loader)
+        torch.set_rng_state(rng_state)
 
         progress_bar = tqdm(
-            self.train_dataloader,
-            desc=f"Epoch {self.epoch + 1}"
+            batches,
+            desc=f"Epoch {self.epoch + 1}",
+            initial=start,
+            total=num_batches,
         )
 
-        for batch_idx, batch in enumerate(progress_bar, start=1):
+        for batch_idx, batch in enumerate(progress_bar, start=start + 1):
             loss = self.compute_loss(batch)
             (loss / self.accumulation_steps).backward()
-            total_loss += loss.item()
+            self.epoch_loss_sum += loss.item()
 
             if batch_idx % self.accumulation_steps == 0 or batch_idx == num_batches:
                 self._optimizer_step()
+                # Position only advances on optimizer steps, so a checkpoint
+                # never holds half-accumulated gradients
+                self.batches_done = batch_idx
                 if self.global_step % self.log_steps == 0:
                     progress_bar.set_postfix({
                         'loss': f'{loss.item():.4f}',
                         'lr': f'{self.optimizer.param_groups[0]["lr"]:.2e}',
                         'step': self.global_step
                     })
+                if self._checkpoint_due():
+                    self._checkpoint()
 
-        avg_loss = total_loss / num_batches
-        self.train_losses.append(avg_loss)
-        return avg_loss
+        self.batches_done = num_batches
+        return self.epoch_loss_sum / max(1, num_batches)
 
     def train(
         self,
         num_epochs: Optional[int] = None,
-        on_epoch_end: Optional[Callable[["BaseTrainer"], None]] = None
+        on_checkpoint: Optional[Callable[["BaseTrainer"], None]] = None,
+        checkpoint_minutes: Optional[float] = None
     ) -> Tuple[List[float], List[Dict[str, float]]]:
         """
-        Train the model.
+        Train the model, continuing from the restored state if resumed.
 
         Args:
-            num_epochs: Epochs to run (defaults to the constructor value)
-            on_epoch_end: Called with the trainer after each epoch, e.g. to
-                save and upload a checkpoint
+            num_epochs: Epochs to run in total (defaults to the constructor value)
+            on_checkpoint: Called with the trainer every `checkpoint_minutes`
+                (after an optimizer step) and after every epoch, e.g. to save
+                and upload a resumable checkpoint
+            checkpoint_minutes: Interval of mid-epoch checkpoints (None = only
+                after each epoch)
 
         Returns:
             Tuple of (train_losses, eval_metrics)
         """
         num_epochs = num_epochs or self.num_epochs
+        self._on_checkpoint = on_checkpoint
+        self._checkpoint_seconds = checkpoint_minutes * 60 if checkpoint_minutes else None
+        self._last_checkpoint = time.monotonic()
+
+        if self.epoch >= num_epochs:
+            print(f"Training already finished ({self.epoch}/{num_epochs} epochs)")
+            return self.train_losses, self.eval_metrics
+        if self.epoch or self.batches_done:
+            print(f"Resuming at epoch {self.epoch + 1}, batch {self.batches_done} "
+                  f"(step {self.global_step})")
+
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         print(f"Training on {self.device} for {num_epochs} epoch(s), "
               f"{trainable:,} trainable parameters")
 
-        for _ in range(num_epochs):
+        while self.epoch < num_epochs:
             train_loss = self.train_epoch()
+            self.train_losses.append(train_loss)
             eval_metrics = self.evaluate()
             if eval_metrics:
                 self.eval_metrics.append(eval_metrics)
@@ -173,18 +260,23 @@ class BaseTrainer:
             print(log_msg)
 
             self.epoch += 1
-            if on_epoch_end is not None:
-                on_epoch_end(self)
+            self.batches_done = 0
+            self.epoch_loss_sum = 0.0
+            self._checkpoint()
 
         return self.train_losses, self.eval_metrics
 
     def state_dict(self, include_optimizer: bool = True) -> Dict[str, Any]:
-        """Training state (counters, history, optionally optimizer/scheduler)."""
+        """Training state: counters, position in the epoch, history, RNG
+        states and optionally optimizer/scheduler state."""
         state = {
             'epoch': self.epoch,
+            'batches_done': self.batches_done,
+            'epoch_loss_sum': self.epoch_loss_sum,
             'global_step': self.global_step,
             'train_losses': self.train_losses,
             'eval_metrics': self.eval_metrics,
+            'rng': _get_rng_state(),
         }
         if include_optimizer:
             state['optimizer'] = self.optimizer.state_dict()
@@ -195,9 +287,13 @@ class BaseTrainer:
     def load_state_dict(self, state: Dict[str, Any]) -> None:
         """Restore training state produced by `state_dict`."""
         self.epoch = state['epoch']
+        self.batches_done = state.get('batches_done', 0)
+        self.epoch_loss_sum = state.get('epoch_loss_sum', 0.0)
         self.global_step = state['global_step']
         self.train_losses = state['train_losses']
         self.eval_metrics = state['eval_metrics']
+        if 'rng' in state:
+            _set_rng_state(state['rng'])
         if 'optimizer' in state:
             self.optimizer.load_state_dict(state['optimizer'])
         if 'scheduler' in state and self.scheduler is not None:

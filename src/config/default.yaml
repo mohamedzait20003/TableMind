@@ -73,6 +73,7 @@ system:
   device: "auto"  # auto, cuda, cpu
   seed: 42        # DoT reports the median of 3 runs: repeat with 3 seeds
   num_workers: 2
+  checkpoint_minutes: 10  # resumable checkpoint to Drive every 10 min + after each epoch
   checkpoint_dir: "./checkpoints"  # local copies
   output_dir: "./outputs"          # plots and predictions
 
