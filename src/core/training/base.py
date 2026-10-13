@@ -36,10 +36,10 @@ def _set_rng_state(state: Dict[str, Any]) -> None:
     """Restore RNG states saved by `_get_rng_state`."""
     random.setstate(state['python'])
     name, keys, *rest = state['numpy']
-    np.random.set_state((name, keys.numpy(), *rest))
-    torch.set_rng_state(state['torch'])
+    np.random.set_state((name, keys.cpu().numpy(), *rest))
+    torch.set_rng_state(state['torch'].cpu())
     if state['cuda'] is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state['cuda'])
+        torch.cuda.set_rng_state_all([rng_state.cpu() for rng_state in state['cuda']])
 
 
 class BaseTrainer:
