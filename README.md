@@ -51,10 +51,12 @@ A reimplementation of DoT (Double Transformer, [Krichene et al., 2021](https://a
 Run the notebooks in order. Each opens with an **Open in Colab** badge, and its first cell clones this repository and installs the requirements.
 
 1. **[01_memory.ipynb](src/notebooks/01_memory.ipynb):** trains the memory encoder, fills the store, and uploads `memory_stage.pt`. Run it once; every pretraining run reuses it.
-2. **[02_pretrain.ipynb](src/notebooks/02_pretrain.ipynb):** loads the memory stage, trains DoT on the full WikiSQL training set, and uploads `<run>_final.pt`. A `<run>_latest.pt` checkpoint is uploaded after every epoch.
+2. **[02_pretrain.ipynb](src/notebooks/02_pretrain.ipynb):** loads the memory stage, trains DoT on the full WikiSQL training set, and uploads `<run>_final.pt`.
 3. **[03_evaluation.ipynb](src/notebooks/03_evaluation.ipynb):** scores a run on the full test split (denotation accuracy, exact match, per-aggregation breakdown). It uploads `<run>_results.json` and compares all runs found in Drive with the DoT paper.
 
-Use **Runtime → Change runtime type → T4 GPU**. Checkpoints pass between notebooks through Google Drive (`MyDrive/TableMind/checkpoints`); you'll be asked to authorize Drive once per session. The notebooks clone the GitHub repository, so push your changes before running them on Colab.
+Use **Runtime → Change runtime type → T4 GPU**.
+
+**Disconnects and resuming.** Colab ends idle sessions, caps session length, and deletes the VM when a session ends. Training in notebooks 1 and 2 therefore saves a resumable checkpoint (weights, optimizer, scheduler, RNG states, epoch and position within the epoch) every 10 minutes (`system.checkpoint_minutes`) and after every epoch, and uploads it to Drive in the background. After a disconnect, reconnect and choose **Runtime → Run all**: the notebook finds the checkpoint and continues where it stopped, losing at most ~10 minutes. Keep at least 10 GB free in Google Drive for these checkpoints. Checkpoints pass between notebooks through Google Drive (`MyDrive/TableMind/checkpoints`); you'll be asked to authorize Drive once per session. The notebooks clone the GitHub repository, so push your changes before running them on Colab.
 
 ### Experiment protocol
 DoT reports the **median of 3 runs**. Notebooks 2 and 3 share a *Run settings* cell:
@@ -131,8 +133,8 @@ Inside `DoTModel.forward`:
 ## 📈 Performance Notes
 
 - Training uses t5-base (task model), t5-base (memory encoder) and tapas-small at batch size 8. If a T4 runs out of memory, set `pretraining.batch_size: 4` and `gradient_accumulation_steps: 2`.
-- One epoch over the full training set is about 7,000 optimizer steps; plan on several hours for 3 epochs on a T4. Colab Pro avoids session time limits. `<run>_latest.pt` is uploaded after every epoch.
-- Weights-only checkpoints are about 1.5 GB (≈360M parameters in fp32, plus the memory store). Set `RESUMABLE = True` in `02_pretrain.ipynb` to also save optimizer state, which roughly triples the size.
+- One epoch over the full training set is about 7,000 optimizer steps; plan on several hours for 3 epochs on a T4, spread over several Colab sessions. Colab Pro still has idle timeouts and session limits; the 10-minute resumable checkpoints make that safe.
+- Final checkpoints (weights + memory store) are about 1.5 GB. Resumable checkpoints also hold AdamW state, about 4.5 GB, and an upload briefly needs room for a second copy.
 
 ## 🐛 Troubleshooting
 

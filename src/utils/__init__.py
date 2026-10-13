@@ -1,6 +1,7 @@
 """Datasets, SQL execution, metrics, checkpoints and general helpers."""
 from .paq import PAQDataset
 from .sql import execute_wikisql
+from .sampler import ResumableSampler
 from .wikisql import WikiSQLDataset, load_wikisql
 from .metrics import denotation_match, evaluate_answers
 from .helpers import (
@@ -17,6 +18,7 @@ from .checkpoint import (
     load_checkpoint,
     upload_checkpoint,
     download_checkpoint,
+    ResumeCheckpointer,
 )
 
 __all__ = [
@@ -24,6 +26,7 @@ __all__ = [
     "WikiSQLDataset",
     "load_wikisql",
     "execute_wikisql",
+    "ResumableSampler",
     "denotation_match",
     "evaluate_answers",
     "load_config",
@@ -37,4 +40,5 @@ __all__ = [
     "load_checkpoint",
     "upload_checkpoint",
     "download_checkpoint",
+    "ResumeCheckpointer",
 ]

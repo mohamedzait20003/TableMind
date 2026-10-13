@@ -1,14 +1,8 @@
-"""
-Checkpoint saving, loading and Google Drive transfer.
-
-Each stage saves locally, then uploads to persistent storage (a Drive folder
-on Colab, a local folder elsewhere); the next stage downloads from there.
-"""
-
 import os
 import sys
 import torch
 import shutil
+import threading
 import torch.nn as nn
 from typing import Any, Dict, Optional
 
@@ -77,7 +71,9 @@ def save_checkpoint(
         checkpoint['config'] = config
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    torch.save(checkpoint, path)
+    tmp_path = path + '.tmp'
+    torch.save(checkpoint, tmp_path)
+    os.replace(tmp_path, path)
     print(f"Checkpoint saved: {path}")
     return path
 
@@ -102,7 +98,7 @@ def load_checkpoint(
     Returns:
         The raw checkpoint dict (e.g. to read its 'config')
     """
-    checkpoint = torch.load(path, map_location=device)
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     if memory_store is not None and 'memory_store' in checkpoint:
         memory_store.load_state_dict(checkpoint['memory_store'])
@@ -121,7 +117,9 @@ def upload_checkpoint(local_path: str, storage_dir: str) -> str:
     """
     destination = os.path.join(storage_dir, os.path.basename(local_path))
     if os.path.abspath(destination) != os.path.abspath(local_path):
-        shutil.copy2(local_path, destination)
+        tmp_destination = destination + '.tmp'
+        shutil.copyfile(local_path, tmp_destination)
+        os.replace(tmp_destination, destination)
     print(f"Uploaded: {destination}")
     return destination
 
@@ -150,3 +148,79 @@ def download_checkpoint(
     if os.path.abspath(source) != os.path.abspath(destination):
         shutil.copy2(source, destination)
     return destination
+
+
+class ResumeCheckpointer:
+    """
+    Keeps one resumable checkpoint per run in persistent storage.
+
+    `save` writes the model, optimizer, scheduler, RNG states and the position
+    in the epoch to local disk (a short pause), then uploads it to storage in
+    a background thread while training continues. `resume` restores the
+    latest uploaded checkpoint, if there is one.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        storage_dir: str,
+        local_dir: str = './checkpoints',
+        config: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Args:
+            name: Checkpoint file name, e.g. '<run>_resume.pt'
+            storage_dir: Persistent folder from `get_storage_dir`
+            local_dir: Local folder for the fast first write
+            config: Configuration stored with the checkpoint
+        """
+        self.storage_path = os.path.join(storage_dir, name)
+        self.local_path = os.path.join(local_dir, name)
+        self.storage_dir = storage_dir
+        self.config = config
+        self._upload: Optional[threading.Thread] = None
+        self._error: Optional[OSError] = None
+
+    def _upload_in_background(self) -> None:
+        try:
+            upload_checkpoint(self.local_path, self.storage_dir)
+        except OSError as error:
+            self._error = error
+
+    def wait(self) -> None:
+        """Block until the last upload has finished; report its failure."""
+        if self._upload is not None:
+            self._upload.join()
+            self._upload = None
+        if self._error is not None:
+            error, self._error = self._error, None
+            print(f"WARNING: checkpoint upload failed: {error!r}")
+
+    def save(self, trainer) -> None:
+        """Save the trainer's full state and start uploading it."""
+        self.wait()  # never overwrite the local file while it is uploading
+        save_checkpoint(
+            self.local_path, trainer.model, trainer=trainer,
+            config=self.config, include_optimizer=True,
+        )
+        self._upload = threading.Thread(target=self._upload_in_background, daemon=True)
+        self._upload.start()
+
+    def __call__(self, trainer) -> None:
+        """Use as the trainer's `on_checkpoint` hook."""
+        self.save(trainer)
+
+    def resume(self, trainer, device: str = 'cpu') -> bool:
+        """
+        Restore model and training state from storage if a checkpoint exists.
+
+        Returns:
+            True if training state was restored
+        """
+        if not os.path.exists(self.storage_path):
+            print(f"No resume checkpoint at {self.storage_path}: starting fresh")
+            return False
+        load_checkpoint(self.storage_path, trainer.model, trainer=trainer, device=device)
+        print(f"Resumed: epoch {trainer.epoch + 1}, batch {trainer.batches_done}, "
+              f"step {trainer.global_step}")
+        return True
