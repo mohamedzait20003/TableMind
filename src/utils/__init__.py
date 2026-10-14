@@ -1,8 +1,8 @@
 """Datasets, SQL execution, metrics, checkpoints and general helpers."""
-from .paq import PAQDataset
-from .sql import execute_wikisql
+from .paq import PAQDataset, TextPairDataset
+from .sql import WikiSQLExecutor, answer_from_prediction
 from .sampler import ResumableSampler
-from .wikisql import WikiSQLDataset, load_wikisql
+from .wikisql import WikiSQLDataset, load_wikisql, wikisql_memory_pairs
 from .metrics import denotation_match, evaluate_answers
 from .helpers import (
     load_config,
@@ -23,9 +23,12 @@ from .checkpoint import (
 
 __all__ = [
     "PAQDataset",
+    "TextPairDataset",
     "WikiSQLDataset",
     "load_wikisql",
-    "execute_wikisql",
+    "wikisql_memory_pairs",
+    "WikiSQLExecutor",
+    "answer_from_prediction",
     "ResumableSampler",
     "denotation_match",
     "evaluate_answers",

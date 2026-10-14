@@ -4,7 +4,9 @@ Answer-level evaluation for WikiSQL.
 Denotation accuracy follows the weakly supervised WikiSQL protocol used by
 TAPAS and DoT: a prediction is correct when its answer values equal the
 values obtained by executing the gold SQL, as an unordered multiset, with
-numbers compared numerically.
+numbers compared numerically. Operator-prefixed predictions ("count: a | b")
+are aggregated first. Examples with an empty gold answer are correct only
+when the prediction is empty too.
 """
 
 import math
@@ -12,7 +14,7 @@ import torch
 from tqdm import tqdm
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from .sql import ANSWER_SEPARATOR, to_float
+from .sql import ANSWER_SEPARATOR, answer_from_prediction, to_float
 
 Value = Union[float, str]
 
@@ -31,12 +33,6 @@ def _values_match(a: Value, b: Value) -> bool:
     return a == b
 
 
-def parse_prediction(text: str) -> List[str]:
-    """Split a generated answer into values on ANSWER_SEPARATOR."""
-    separator = ANSWER_SEPARATOR.strip()
-    return [value for value in text.split(separator) if value.strip()]
-
-
 def denotation_match(prediction: str, gold_values: List[str]) -> bool:
     """
     True when the predicted values equal the gold values as a multiset.
@@ -45,7 +41,7 @@ def denotation_match(prediction: str, gold_values: List[str]) -> bool:
         prediction: Generated answer text
         gold_values: Values from executing the gold SQL
     """
-    predicted = [_normalize_value(v) for v in parse_prediction(prediction)]
+    predicted = [_normalize_value(v) for v in answer_from_prediction(prediction)]
     remaining = [_normalize_value(v) for v in gold_values]
     if len(predicted) != len(remaining):
         return False
@@ -61,15 +57,17 @@ def denotation_match(prediction: str, gold_values: List[str]) -> bool:
 
 
 def _exact(prediction: str, answer: str) -> bool:
-    """String match ignoring case and whitespace."""
-    return ''.join(prediction.lower().split()) == ''.join(answer.lower().split())
+    """Computed answer text equals the gold answer text, ignoring case and
+    whitespace (order-sensitive, unlike denotation accuracy)."""
+    computed = ANSWER_SEPARATOR.join(answer_from_prediction(prediction))
+    return ''.join(computed.lower().split()) == ''.join(answer.lower().split())
 
 
 def evaluate_answers(
     model: torch.nn.Module,
     dataloader: torch.utils.data.DataLoader,
     device: str,
-    max_new_tokens: int = 32,
+    max_new_tokens: int = 64,
     max_batches: Optional[int] = None
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
     """
@@ -83,8 +81,10 @@ def evaluate_answers(
         max_batches: Stop after this many batches (None = all)
 
     Returns:
-        ({'denotation_accuracy', 'exact_match', 'examples'}, per-example
-        records with 'prediction', 'answer', 'denotation' and 'exact')
+        ({'denotation_accuracy', 'denotation_accuracy_answerable',
+        'exact_match', 'examples', 'empty_gold'}, per-example records with
+        'prediction' (generated text), 'computed' (answer after aggregation),
+        'answer', 'empty_gold', 'denotation' and 'exact')
     """
     model.eval()
     records = []
@@ -102,15 +102,22 @@ def evaluate_answers(
         ):
             records.append({
                 'prediction': prediction,
+                'computed': ANSWER_SEPARATOR.join(answer_from_prediction(prediction)),
                 'answer': answer,
+                'empty_gold': not values,
                 'denotation': denotation_match(prediction, values),
                 'exact': _exact(prediction, answer),
             })
 
-    total = len(records)
+    def rate(rows: List[Dict[str, Any]], key: str) -> float:
+        return sum(r[key] for r in rows) / len(rows) if rows else 0.0
+
+    answerable = [r for r in records if not r['empty_gold']]
     metrics = {
-        'denotation_accuracy': sum(r['denotation'] for r in records) / total if total else 0.0,
-        'exact_match': sum(r['exact'] for r in records) / total if total else 0.0,
-        'examples': total,
+        'denotation_accuracy': rate(records, 'denotation'),
+        'denotation_accuracy_answerable': rate(answerable, 'denotation'),
+        'exact_match': rate(records, 'exact'),
+        'examples': len(records),
+        'empty_gold': len(records) - len(answerable),
     }
     return metrics, records

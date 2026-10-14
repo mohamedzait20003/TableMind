@@ -115,6 +115,37 @@ class DoTModel(nn.Module):
         )
         self._skip_tokens = set(self.pruner.tokenizer.all_special_tokens)
         self._skip_tokens.add('[EMPTY]')
+        # Mixed precision on CUDA (None = fp32); set via `set_precision`
+        self.amp_dtype: Optional[torch.dtype] = None
+
+    def set_precision(self, precision: str = 'auto') -> None:
+        """
+        'bf16' / 'auto': bfloat16 autocast when the GPU supports it (A100,
+        L4, ...); 'fp32' or no bf16 support: full precision. fp16 is not
+        offered: T5 overflows in fp16.
+        """
+        use_bf16 = (
+            precision in ('auto', 'bf16')
+            and torch.cuda.is_available()
+            and torch.cuda.is_bf16_supported()
+        )
+        self.amp_dtype = torch.bfloat16 if use_bf16 else None
+
+    def enable_gradient_checkpointing(self) -> None:
+        """Recompute activations in backward instead of storing them."""
+        kwargs = {'gradient_checkpointing_kwargs': {'use_reentrant': False}}
+        self.task_model.t5.gradient_checkpointing_enable(**kwargs)
+        self.task_model.memory_encoder.encoder.gradient_checkpointing_enable(**kwargs)
+        if getattr(self.pruner.tapas, 'supports_gradient_checkpointing', False):
+            self.pruner.tapas.gradient_checkpointing_enable(**kwargs)
+
+    def _autocast(self, device: torch.device):
+        """bf16 autocast context (a no-op in fp32 or on CPU)."""
+        return torch.autocast(
+            device_type='cuda',
+            dtype=self.amp_dtype or torch.float32,
+            enabled=self.amp_dtype is not None and device.type == 'cuda',
+        )
 
     @classmethod
     def from_config(
@@ -125,7 +156,7 @@ class DoTModel(nn.Module):
     ) -> "DoTModel":
         """Build from a loaded config (model and pretraining sections)."""
         model = config['model']
-        return cls(
+        dot_model = cls(
             memory_store,
             memory_encoder,
             k=model['pruning_transformer']['top_k'],
@@ -135,6 +166,10 @@ class DoTModel(nn.Module):
             task_max_length=model['task_transformer']['max_length'],
             use_memory=model['task_transformer']['use_memory'],
         )
+        dot_model.set_precision(config['system'].get('precision', 'auto'))
+        if model['task_transformer'].get('gradient_checkpointing', False):
+            dot_model.enable_gradient_checkpointing()
+        return dot_model
 
     @staticmethod
     def _cell_index(token_type_ids: torch.Tensor, is_cell: torch.Tensor) -> torch.Tensor:
@@ -316,7 +351,8 @@ class DoTModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         token_type_ids: torch.Tensor,
-        labels: Optional[torch.Tensor] = None
+        labels: Optional[torch.Tensor] = None,
+        memory_ids: Optional[torch.Tensor] = None
     ):
         """
         Forward pass through the complete DoT pipeline.
@@ -326,19 +362,23 @@ class DoTModel(nn.Module):
             attention_mask: Attention mask of shape (batch_size, seq_len)
             token_type_ids: TAPAS token type ids (batch_size, seq_len, 7)
             labels: T5 target ids (-100 = ignored)
+            memory_ids: Memory entry each example must not retrieve (its own
+                WikiSQL entry during training), -1 = none
 
         Returns:
             Model outputs from task transformer
         """
-        t5_ids, t5_mask, token_scale = self.task_inputs(
-            input_ids, attention_mask, token_type_ids
-        )
-        return self.task_model(
-            input_ids=t5_ids,
-            attention_mask=t5_mask,
-            token_scale=token_scale,
-            labels=labels,
-        )
+        with self._autocast(input_ids.device):
+            t5_ids, t5_mask, token_scale = self.task_inputs(
+                input_ids, attention_mask, token_type_ids
+            )
+            return self.task_model(
+                input_ids=t5_ids,
+                attention_mask=t5_mask,
+                token_scale=token_scale,
+                labels=labels,
+                memory_ids=memory_ids,
+            )
 
     @torch.no_grad()
     def generate(
@@ -346,22 +386,23 @@ class DoTModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         token_type_ids: torch.Tensor,
-        max_new_tokens: int = 32,
+        max_new_tokens: int = 64,
         **generate_kwargs
     ) -> List[str]:
         """
         Generate answer strings for a batch of table-question pairs.
         """
-        t5_ids, t5_mask, token_scale = self.task_inputs(
-            input_ids, attention_mask, token_type_ids
-        )
-        hidden = self.task_model.encode(t5_ids, t5_mask, token_scale)
-        output_ids = self.task_model.t5.generate(
-            encoder_outputs=BaseModelOutput(last_hidden_state=hidden),
-            attention_mask=t5_mask,
-            max_new_tokens=max_new_tokens,
-            **generate_kwargs
-        )
+        with self._autocast(input_ids.device):
+            t5_ids, t5_mask, token_scale = self.task_inputs(
+                input_ids, attention_mask, token_type_ids
+            )
+            hidden = self.task_model.encode(t5_ids, t5_mask, token_scale)
+            output_ids = self.task_model.t5.generate(
+                encoder_outputs=BaseModelOutput(last_hidden_state=hidden),
+                attention_mask=t5_mask,
+                max_new_tokens=max_new_tokens,
+                **generate_kwargs
+            )
         return self.task_model.tokenizer.batch_decode(
             output_ids, skip_special_tokens=True
         )

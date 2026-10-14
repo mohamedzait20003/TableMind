@@ -2,7 +2,8 @@
 Key-value memory store for the DoT model.
 
 Entries are kept on CPU; retrieval stacks them once and caches the stacked
-tensors on the target device until the store changes.
+tensors on the target device until the store changes. Each entry has an id
+(-1 = no id) so a training example can be kept from retrieving its own entry.
 """
 
 import math
@@ -23,28 +24,32 @@ class KeyValueMemoryStore:
         """Initialize empty memory store."""
         self.keys = []
         self.values = []
-        self._cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        self.ids = []
+        self._cache: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None
 
-    def add_entry(self, key: torch.Tensor, value: torch.Tensor) -> None:
+    def add_entry(self, key: torch.Tensor, value: torch.Tensor, entry_id: int = -1) -> None:
         """
         Add a key-value pair to the memory store.
 
         Args:
             key: Key tensor to store
             value: Value tensor to store
+            entry_id: Id used to exclude the entry from retrieval (-1 = none)
         """
         # Store on CPU to avoid GPU memory growth across runs
         self.keys.append(key.detach().cpu())
         self.values.append(value.detach().cpu())
+        self.ids.append(int(entry_id))
         self._cache = None
 
-    def _stacked(self, device) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return (keys, values) stacked on `device`, building the cache once."""
+    def _stacked(self, device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return (keys, values, ids) stacked on `device`, building the cache once."""
         device = torch.device(device)
         if self._cache is None or self._cache[0].device != device:
             self._cache = (
                 torch.stack(self.keys).to(device),
                 torch.stack(self.values).to(device),
+                torch.tensor(self.ids, dtype=torch.long, device=device),
             )
         return self._cache
 
@@ -52,7 +57,8 @@ class KeyValueMemoryStore:
         self,
         query_keys: torch.Tensor,
         top_k: int = 1,
-        device: str = "cuda"
+        device: str = "cuda",
+        exclude_ids: Optional[torch.Tensor] = None
     ) -> Optional[torch.Tensor]:
         """
         Retrieve a softmax-weighted sum of the top-k most similar values.
@@ -64,6 +70,8 @@ class KeyValueMemoryStore:
             query_keys: Query keys of shape (batch_size, proj_dim)
             top_k: Number of top similar entries to retrieve
             device: Device to perform computations on
+            exclude_ids: Per-query entry id that must not be retrieved
+                (batch_size,), -1 = no exclusion
 
         Returns:
             Retrieved values of shape (batch_size, proj_dim) or None if empty
@@ -71,11 +79,15 @@ class KeyValueMemoryStore:
         if len(self.keys) == 0:
             return None
 
-        store_keys, store_values = self._stacked(device)
+        store_keys, store_values, store_ids = self._stacked(device)
         top_k = min(top_k, store_keys.size(0))
 
         # Scaled dot-product similarity, as in attention
         sim = query_keys @ store_keys.t() / math.sqrt(store_keys.size(1))
+        if exclude_ids is not None:
+            own = (store_ids.unsqueeze(0) == exclude_ids.to(device).unsqueeze(1))
+            own &= exclude_ids.to(device).unsqueeze(1) >= 0
+            sim = sim.masked_fill(own, float('-inf'))
         topk_sim, topk_idx = sim.topk(top_k, dim=1)
         weights = F.softmax(topk_sim, dim=1)
 
@@ -90,15 +102,18 @@ class KeyValueMemoryStore:
         """Clear all stored entries."""
         self.keys.clear()
         self.values.clear()
+        self.ids.clear()
         self._cache = None
 
     def state_dict(self) -> Dict[str, torch.Tensor]:
         """Return stored keys/values as stacked CPU tensors for checkpointing."""
         if len(self.keys) == 0:
-            return {'keys': torch.empty(0), 'values': torch.empty(0)}
+            return {'keys': torch.empty(0), 'values': torch.empty(0),
+                    'ids': torch.empty(0, dtype=torch.long)}
         return {
             'keys': torch.stack(self.keys),
             'values': torch.stack(self.values),
+            'ids': torch.tensor(self.ids, dtype=torch.long),
         }
 
     def load_state_dict(self, state: Dict[str, torch.Tensor]) -> None:
@@ -106,3 +121,5 @@ class KeyValueMemoryStore:
         self.clear()
         self.keys = list(state['keys'].cpu().unbind(0))
         self.values = list(state['values'].cpu().unbind(0))
+        ids = state.get('ids')
+        self.ids = ids.tolist() if ids is not None else [-1] * len(self.keys)

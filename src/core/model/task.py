@@ -65,7 +65,8 @@ class TaskTransformer(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        token_scale: Optional[torch.Tensor] = None
+        token_scale: Optional[torch.Tensor] = None,
+        memory_ids: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Memory-augmented encoding.
@@ -75,6 +76,8 @@ class TaskTransformer(nn.Module):
             attention_mask: Attention mask of shape (batch_size, seq_len)
             token_scale: Per-token multiplier for the input embeddings
                 (pruning scores), shape (batch_size, seq_len)
+            memory_ids: Memory entry each example must not retrieve (its own
+                entry during training), shape (batch_size,), -1 = none
 
         Returns:
             Encoder hidden states of shape (batch_size, seq_len, d_model)
@@ -103,7 +106,8 @@ class TaskTransformer(nn.Module):
         pooled = masked_mean(combined_hidden, attention_mask)
         query_vec = self.query_projection(pooled)
         retrieved_memory = self.memory_store.retrieve(
-            query_vec, top_k=self.memory_top_k, device=input_ids.device
+            query_vec, top_k=self.memory_top_k, device=input_ids.device,
+            exclude_ids=memory_ids,
         )
 
         if retrieved_memory is not None:
@@ -127,7 +131,8 @@ class TaskTransformer(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         token_scale: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None
+        labels: Optional[torch.Tensor] = None,
+        memory_ids: Optional[torch.Tensor] = None
     ):
         """
         Forward pass with memory-augmented generation.
@@ -137,11 +142,12 @@ class TaskTransformer(nn.Module):
             attention_mask: Attention mask of shape (batch_size, seq_len)
             token_scale: Per-token embedding multiplier (pruning scores)
             labels: Target labels for training (-100 = ignored)
+            memory_ids: Memory entry each example must not retrieve
 
         Returns:
             Model outputs with loss and logits
         """
-        combined_hidden = self.encode(input_ids, attention_mask, token_scale)
+        combined_hidden = self.encode(input_ids, attention_mask, token_scale, memory_ids)
         return self.t5(
             encoder_outputs=(combined_hidden,),
             attention_mask=attention_mask,

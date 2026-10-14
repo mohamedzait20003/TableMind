@@ -97,10 +97,10 @@ class MemoryTrainer(BaseTrainer):
 
         Args:
             memory_store: Store to fill (existing entries are kept)
-            dataloader: PAQ loader (question and passage fields)
+            dataloader: Pair loader (question, passage and entry_id fields)
         """
         self.model.eval()
-        for batch in tqdm(dataloader, desc="Encoding PAQ to Memory"):
+        for batch in tqdm(dataloader, desc="Encoding to memory"):
             question_keys, _ = self.model(
                 batch['question_input_ids'].to(self.device),
                 batch['question_attention_mask'].to(self.device),
@@ -110,7 +110,8 @@ class MemoryTrainer(BaseTrainer):
                 batch['passage_attention_mask'].to(self.device),
             )
             question_keys = F.normalize(question_keys, dim=-1)
-            for key, value in zip(question_keys, passage_values):
-                memory_store.add_entry(key, value)
+            entry_ids = batch.get('entry_id', torch.full((question_keys.size(0),), -1))
+            for key, value, entry_id in zip(question_keys, passage_values, entry_ids.tolist()):
+                memory_store.add_entry(key, value, entry_id)
 
         print(f"Encoded {memory_store.size()} entries to memory store")

@@ -15,14 +15,22 @@ model:
     model_name: "google/tapas-small-finetuned-wtq"
     top_k: 256  # TAPAS-token budget; whole cells, question and header always kept
 
-  # Task transformer: T5 replaces DoT's second (large) TAPAS
+  # Task transformer: T5 replaces DoT's second (large) TAPAS.
+  # t5-large needs a GPU with >= 24 GB (A100 or L4); it does not fit a T4.
   task_transformer:
-    model_name: "t5-base"
+    model_name: "t5-large"
     max_length: 512    # T5 input length after re-tokenizing the kept tokens
     use_memory: true   # false = ablation without memory retrieval
+    gradient_checkpointing: true  # recompute activations: far less GPU memory, ~30% slower
 
 # Dataset Configuration
 data:
+  # Memory store contents: PAQ pairs (open-domain facts) and WikiSQL
+  # training questions -> query patterns ("count school / club team where
+  # player"); training never retrieves an example's own entry
+  memory:
+    wikisql_train: true
+
   # PAQ dataset for memory
   paq:
     split: "train"
@@ -42,7 +50,7 @@ data:
     test_subset_ratio: 1.0
     model_name: "google/tapas-small-finetuned-wtq"
     max_length: 1024       # TAPAS input length before pruning, as in DoT
-    answer_max_length: 32  # T5 target length for executed SQL answers
+    answer_max_length: 64  # T5 target length ("count: a | b | c" for aggregations)
 
 # Stage 1: contrastive memory-encoder training on PAQ
 memory_training:
@@ -67,12 +75,15 @@ pretraining:
   gradient_accumulation_steps: 1
   log_steps: 100
   memory_top_k: 8  # >1 so the softmax over retrieved entries trains the query projection
+  gate_lr_multiplier: 10  # gates train 10x faster, so memory/table signals can open up
+  select_best_by: "eval_denotation_accuracy"  # best epoch -> <run>_best.pt
 
 # System Configuration
 system:
   device: "auto"  # auto, cuda, cpu
   seed: 42        # DoT reports the median of 3 runs: repeat with 3 seeds
   num_workers: 2
+  precision: "auto"  # bf16 autocast on GPUs that support it (A100, L4), else fp32
   checkpoint_minutes: 10  # resumable checkpoint to Drive every 10 min + after each epoch
   checkpoint_dir: "./checkpoints"  # local copies
   output_dir: "./outputs"          # plots and predictions
@@ -85,6 +96,6 @@ storage:
 
 # Experiment Configuration
 experiment:
-  name: "dot_t5_memory"
+  name: "tablemind_v2"
   description: "DoT with a T5 task transformer and key-value memory on WikiSQL"
   tags: ["dot", "t5", "memory", "table-qa"]

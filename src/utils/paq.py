@@ -1,18 +1,84 @@
 """
-PAQ (Probably Asked Questions) dataset.
+Question-passage pair datasets for the memory.
 
-Question-passage pairs used to train the memory encoder (stage 1) and to
-fill the key-value memory store.
+PAQ (Probably Asked Questions) pairs train the memory encoder (stage 1); PAQ
+pairs and WikiSQL (question, query pattern) pairs fill the key-value store.
 """
 
 import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from transformers import T5TokenizerFast
 
 
-class PAQDataset(Dataset):
+class TextPairDataset(Dataset):
+    """
+    Tokenized (question, passage) pairs with a memory-store id per pair
+    (-1 = no id).
+    """
+
+    def __init__(
+        self,
+        pairs: Sequence[Tuple[str, str]],
+        model_name: str = 't5-base',
+        max_length: int = 64,
+        passage_max_length: int = 128,
+        entry_ids: Optional[Sequence[int]] = None
+    ):
+        """
+        Args:
+            pairs: (question, passage) texts
+            model_name: Model name for tokenizer initialization
+            max_length: Fixed token length for questions
+            passage_max_length: Fixed token length for passages
+            entry_ids: Memory-store id per pair (default: all -1)
+        """
+        self.pairs = list(pairs)
+        self.entry_ids = list(entry_ids) if entry_ids is not None else [-1] * len(self.pairs)
+        self.tokenizer = T5TokenizerFast.from_pretrained(model_name)
+        self.max_length = max_length
+        self.passage_max_length = passage_max_length
+
+    def __len__(self) -> int:
+        """Return dataset size."""
+        return len(self.pairs)
+
+    def _encode(self, text: str, max_length: int) -> Dict[str, torch.Tensor]:
+        """Tokenize one string to a fixed length."""
+        encoded = self.tokenizer(
+            text,
+            return_tensors='pt',
+            padding='max_length',
+            truncation=True,
+            max_length=max_length,
+        )
+        return {k: v.squeeze(0) for k, v in encoded.items()}
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Get a single dataset item.
+
+        Args:
+            idx: Item index
+
+        Returns:
+            Dictionary with tokenized question and passage, and the entry id
+        """
+        question, passage = self.pairs[idx]
+        encoded_question = self._encode(question, self.max_length)
+        encoded_passage = self._encode(passage, self.passage_max_length)
+
+        return {
+            "question_input_ids": encoded_question['input_ids'],
+            "question_attention_mask": encoded_question['attention_mask'],
+            "passage_input_ids": encoded_passage['input_ids'],
+            "passage_attention_mask": encoded_passage['attention_mask'],
+            "entry_id": torch.tensor(self.entry_ids[idx], dtype=torch.long),
+        }
+
+
+class PAQDataset(TextPairDataset):
     """
     Dataset wrapper for PAQ (Probably Asked Questions) dataset.
 
@@ -45,12 +111,10 @@ class PAQDataset(Dataset):
         )
         stream = stream.shuffle(seed=seed, buffer_size=10_000)
         # Each row is {"set": [question, answer_passage]}
-        self.pairs = [
+        pairs: List[Tuple[str, str]] = [
             (row['set'][0], row['set'][1]) for row in stream.take(num_examples)
         ]
-        self.tokenizer = T5TokenizerFast.from_pretrained(model_name)
-        self.max_length = max_length
-        self.passage_max_length = passage_max_length
+        super().__init__(pairs, model_name, max_length, passage_max_length)
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "PAQDataset":
@@ -64,39 +128,3 @@ class PAQDataset(Dataset):
             passage_max_length=paq['passage_max_length'],
             seed=config['system']['seed'],
         )
-
-    def __len__(self) -> int:
-        """Return dataset size."""
-        return len(self.pairs)
-
-    def _encode(self, text: str, max_length: int) -> Dict[str, torch.Tensor]:
-        """Tokenize one string to a fixed length."""
-        encoded = self.tokenizer(
-            text,
-            return_tensors='pt',
-            padding='max_length',
-            truncation=True,
-            max_length=max_length,
-        )
-        return {k: v.squeeze(0) for k, v in encoded.items()}
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        Get a single dataset item.
-
-        Args:
-            idx: Item index
-
-        Returns:
-            Dictionary with tokenized question and passage
-        """
-        question, passage = self.pairs[idx]
-        encoded_question = self._encode(question, self.max_length)
-        encoded_passage = self._encode(passage, self.passage_max_length)
-
-        return {
-            "question_input_ids": encoded_question['input_ids'],
-            "question_attention_mask": encoded_question['attention_mask'],
-            "passage_input_ids": encoded_passage['input_ids'],
-            "passage_attention_mask": encoded_passage['attention_mask'],
-        }

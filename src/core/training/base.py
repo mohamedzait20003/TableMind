@@ -62,6 +62,7 @@ class BaseTrainer:
         gradient_clipping: float = 1.0,
         gradient_accumulation_steps: int = 1,
         log_steps: int = 100,
+        lr_multipliers: Optional[Dict[str, float]] = None,
     ):
         """
         Initialize the trainer.
@@ -79,6 +80,9 @@ class BaseTrainer:
             gradient_clipping: Max gradient norm
             gradient_accumulation_steps: Batches per optimizer step
             log_steps: Optimizer steps between progress-bar updates
+            lr_multipliers: {name substring: factor}; matching parameters
+                train at learning_rate * factor without weight decay
+                (e.g. {'_gate': 10} for the memory gates)
         """
         self.model = model.to(device)
         self.train_dataloader = train_dataloader
@@ -90,7 +94,7 @@ class BaseTrainer:
         self.log_steps = log_steps
 
         self.optimizer = AdamW(
-            [p for p in self.model.parameters() if p.requires_grad],
+            self._param_groups(float(learning_rate), lr_multipliers or {}),
             lr=float(learning_rate),
             weight_decay=float(weight_decay),
         )
@@ -118,6 +122,27 @@ class BaseTrainer:
         self._on_checkpoint: Optional[Callable[["BaseTrainer"], None]] = None
         self._checkpoint_seconds: Optional[float] = None
         self._last_checkpoint = time.monotonic()
+
+    def _param_groups(
+        self, learning_rate: float, lr_multipliers: Dict[str, float]
+    ) -> List[Dict[str, Any]]:
+        """Default group plus one group per lr multiplier."""
+        groups: Dict[str, List[nn.Parameter]] = {key: [] for key in lr_multipliers}
+        default: List[nn.Parameter] = []
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            key = next((k for k in lr_multipliers if k in name), None)
+            (groups[key] if key is not None else default).append(param)
+        param_groups: List[Dict[str, Any]] = [{'params': default}]
+        for key, params in groups.items():
+            if params:
+                param_groups.append({
+                    'params': params,
+                    'lr': learning_rate * lr_multipliers[key],
+                    'weight_decay': 0.0,
+                })
+        return param_groups
 
     def compute_loss(self, batch: Dict[str, Any]) -> torch.Tensor:
         """Return the training loss for one batch."""
@@ -215,7 +240,8 @@ class BaseTrainer:
         self,
         num_epochs: Optional[int] = None,
         on_checkpoint: Optional[Callable[["BaseTrainer"], None]] = None,
-        checkpoint_minutes: Optional[float] = None
+        checkpoint_minutes: Optional[float] = None,
+        on_epoch_end: Optional[Callable[["BaseTrainer"], None]] = None
     ) -> Tuple[List[float], List[Dict[str, float]]]:
         """
         Train the model, continuing from the restored state if resumed.
@@ -227,6 +253,9 @@ class BaseTrainer:
                 and upload a resumable checkpoint
             checkpoint_minutes: Interval of mid-epoch checkpoints (None = only
                 after each epoch)
+            on_epoch_end: Called with the trainer after each epoch's
+                evaluation, before the epoch checkpoint (e.g. to keep the
+                best epoch)
 
         Returns:
             Tuple of (train_losses, eval_metrics)
@@ -262,6 +291,8 @@ class BaseTrainer:
             self.epoch += 1
             self.batches_done = 0
             self.epoch_loss_sum = 0.0
+            if on_epoch_end is not None:
+                on_epoch_end(self)
             self._checkpoint()
 
         return self.train_losses, self.eval_metrics

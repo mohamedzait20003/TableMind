@@ -61,7 +61,8 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     Returns:
         Batched tensors, plus answer strings ('answers') and answer value
-        lists ('answer_values')
+        lists ('answer_values'), and memory-store ids to exclude from
+        retrieval ('memory_ids', -1 = none)
     """
     return {
         'input_ids': torch.stack([item['input_ids'] for item in batch]),
@@ -74,6 +75,7 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         'labels': torch.stack([item['labels'] for item in batch]),
         'answers': [item.get('answer', '') for item in batch],
         'answer_values': [item.get('answer_values', []) for item in batch],
+        'memory_ids': torch.tensor([item.get('memory_id', -1) for item in batch]),
     }
 
 
